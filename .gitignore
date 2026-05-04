@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# Build / Distribution
+build/
+dist/
+wheels/
+*.spec
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Linting / Type checking
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Flet
+.flet/
+
+# Environment
+.env
+.env.local

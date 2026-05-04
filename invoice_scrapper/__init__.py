@@ -1,0 +1,3 @@
+"""Invoice Scrapper - PDF invoice data extraction desktop app."""
+
+__version__ = "0.1.0"
