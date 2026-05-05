@@ -1,7 +1,7 @@
 """Tests for invoice processor pipeline."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from invoice_scrapper.invoice_processor import InvoiceProcessor
 from invoice_scrapper.config import DEFAULT_FIELDS

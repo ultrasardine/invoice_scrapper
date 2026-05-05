@@ -10,6 +10,16 @@ _DATE_RE = re.compile(r"\d{4}[-/.]\d{2}[-/.]\d{2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4
 _MONEY_RE = re.compile(r"\d[\d\s.]*,\d{2}|\d[\d\s,]*\.\d{2}")
 _INVOICE_NUM_RE = re.compile(r"[\w/\-]+")
 
+# Field names (normalised) that map to the total-amount extractor.
+# Only these specific names are special-cased; arbitrary custom fields that
+# happen to contain "preco" or "total" fall through to the generic extractor.
+_TOTAL_FIELDS: frozenset[str] = frozenset({
+    "preco total sem iva",
+    "preco total",
+    "total sem iva",
+    "total com iva",
+})
+
 
 def _normalize(text: str) -> str:
     """Remove accents and lowercase for matching."""
@@ -242,14 +252,26 @@ def _extract_invoice_number(words: list[Word]) -> str:
     # If result is too short or looks incomplete, try ATCUD
     if len(result) <= 3:
         for w in words:
-            if w.text.startswith("ATCUD:"):
-                parts = w.text.split("-")
-                if len(parts) >= 2 and len(parts[-1]) > 0:
-                    atcud_num = parts[-1]
-                    # Combine with série if available
-                    if result:
-                        return f"{result}{atcud_num}"
-                    return atcud_num
+            if not w.text.upper().startswith("ATCUD"):
+                continue
+            # The code may be embedded in the same token ("ATCUD:XXXX-1234")
+            # or it may be in a separate token to the right ("ATCUD:" "XXXX-1234").
+            remainder = ""
+            if ":" in w.text:
+                remainder = w.text[w.text.index(":") + 1:].strip()
+            if not remainder:
+                right = _words_to_right(w, words)
+                if right:
+                    remainder = right[0].text.strip()
+            if not remainder:
+                continue
+            parts = remainder.split("-")
+            if len(parts) >= 2 and len(parts[-1]) > 0:
+                atcud_num = parts[-1]
+                # Combine with série if available
+                if result:
+                    return f"{result}{atcud_num}"
+                return atcud_num
 
     return result
 
@@ -342,6 +364,57 @@ def _extract_total(words: list[Word]) -> str:
     return ""
 
 
+def _extract_fields_from_text(
+    text: str,
+    fields: list[str],
+    context_window: int = 200,
+) -> dict[str, str]:
+    """Extract fields from plain text when no positional word data is available."""
+    result: dict[str, str] = {}
+    norm_text = _normalize(text)
+
+    for field_name in fields:
+        norm_field = _normalize(field_name)
+
+        if norm_field in ("preco unitario do artigo", "quantidade"):
+            result[field_name] = ""
+            continue
+
+        # Find the longest keyword (>3 chars) from the field name in the text
+        field_keywords = sorted(
+            [kw for kw in norm_field.split() if len(kw) > 3],
+            key=len, reverse=True,
+        )
+        found = ""
+        for kw in field_keywords:
+            idx = norm_text.find(kw)
+            if idx < 0:
+                continue
+            # Map back to original text position and grab a context window
+            snippet = text[idx: idx + context_window]
+            # Try date pattern
+            m = _DATE_RE.search(snippet)
+            if m and m.start() > 0:
+                found = m.group(0)
+                break
+            # Try money pattern
+            m = _MONEY_RE.search(snippet)
+            if m and m.start() > 0:
+                found = m.group(0)
+                break
+            # Try first token after a colon or whitespace
+            m = re.search(r"[:\s]+(\S+)", snippet)
+            if m:
+                candidate = m.group(1).strip(".,;:")
+                if len(candidate) > 1:
+                    found = candidate
+                    break
+
+        result[field_name] = found
+
+    return result
+
+
 def extract_fields(
     text: str,
     fields: list[str],
@@ -361,13 +434,11 @@ def extract_fields(
     Returns:
         Dict mapping field names to extracted values.
     """
-    result: dict[str, str] = {}
-
     if not words:
-        # Fallback to basic text extraction if no positional data
-        for field_name in fields:
-            result[field_name] = ""
-        return result
+        # No positional data – fall back to plain-text extraction
+        return _extract_fields_from_text(text, fields, context_window)
+
+    result: dict[str, str] = {}
 
     for field_name in fields:
         norm_field = _normalize(field_name)
@@ -380,10 +451,10 @@ def extract_fields(
             result[field_name] = _extract_invoice_number(words)
         elif "data" in norm_field and "fatura" in norm_field:
             result[field_name] = _extract_date(words)
-        elif "total" in norm_field or "preco" in norm_field:
+        elif norm_field in _TOTAL_FIELDS:
             result[field_name] = _extract_total(words)
         else:
-            # Generic: try to find the label and get value to the right
+            # Generic: find the label and collect all value words to the right
             result[field_name] = _generic_field_extract(
                 words, norm_field
             )
@@ -392,8 +463,8 @@ def extract_fields(
 
 
 def _generic_field_extract(words: list[Word], norm_field: str) -> str:
-    """Generic extraction: find label words, get value to the right."""
-    field_words = norm_field.split()
+    """Generic extraction: find label words, get all value words to the right."""
+    field_words = set(norm_field.split())
     # Find the longest matching word (>3 chars) in the document
     for fw in sorted(field_words, key=len, reverse=True):
         if len(fw) <= 3:
@@ -402,8 +473,11 @@ def _generic_field_extract(words: list[Word], norm_field: str) -> str:
         for m in matches:
             right = _words_to_right(m, words)
             if right:
-                # Return first non-label word
-                for r in right:
-                    if _normalize(r.text) not in field_words:
-                        return r.text
+                # Collect all non-label words on the same line
+                value_parts = [
+                    r.text for r in right
+                    if _normalize(r.text).rstrip(".:,") not in field_words
+                ]
+                if value_parts:
+                    return " ".join(value_parts)
     return ""

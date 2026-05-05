@@ -1,6 +1,7 @@
 """Invoice processing pipeline orchestrator."""
 
 import logging
+import re
 import unicodedata
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -44,23 +45,26 @@ class InvoiceProcessor:
         errors: list[str] = []
 
         try:
-            # Step 1: Extract text, images, and positional word data
+            # Step 1: Extract text and positional word data
             self.log(f"  Extraindo texto de {pdf_path.name}...")
             pages = self._reader.extract_pages(pdf_path)
 
-            # Combine all words and text across pages
-            all_words = []
-            all_text_parts = []
+            # Step 2: Extract invoice-level fields per-page.
+            # Processing each page independently prevents labels on one page
+            # from spuriously matching values at the same coordinates on
+            # another page.
+            self.log("  Extraindo campos...")
+            field_values: dict[str, str] = {}
+            all_text_parts: list[str] = []
             for p in pages:
-                all_words.extend(p.words)
                 all_text_parts.append(p.text)
-            full_text = "\n".join(all_text_parts)
-
-            # Step 2: Extract invoice-level fields using positional data
-            self.log(f"  Extraindo campos...")
-            field_values = extract_fields(
-                full_text, fields, words=all_words
-            )
+                page_fields = extract_fields(p.text, fields, words=p.words or None)
+                for k, v in page_fields.items():
+                    if v and not field_values.get(k):
+                        field_values[k] = v
+            # Ensure every requested field has an entry
+            for f in fields:
+                field_values.setdefault(f, "")
 
             # Step 3: Detect tables using positional word data
             self.log(f"  Detetando tabelas ({len(pages)} páginas)...")

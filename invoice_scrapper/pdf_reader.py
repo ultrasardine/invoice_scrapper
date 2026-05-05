@@ -43,7 +43,7 @@ class PageData:
 
     words: list[Word]
     text: str
-    image: Image.Image
+    image: Image.Image | None = None
 
 
 class PDFReader:
@@ -57,11 +57,12 @@ class PDFReader:
         """Extract text and page images from a PDF.
 
         Returns:
-            Tuple of (full_text, page_images).
+            Tuple of (full_text, page_images).  Only pages that required OCR
+            produce an image; text-based pages return no image.
         """
         pages = self.extract_pages(pdf_path)
         text = "\n".join(p.text for p in pages)
-        images = [p.image for p in pages]
+        images = [p.image for p in pages if p.image is not None]
         return text, images
 
     def extract_pages(self, pdf_path: Path) -> list[PageData]:
@@ -70,20 +71,21 @@ class PDFReader:
 
         with fitz.open(pdf_path) as doc:
             for page in doc:
-                img = self._render_page(page)
                 page_text = page.get_text().strip()
 
                 if page_text:
-                    # Digital PDF - use PyMuPDF text blocks for positions
+                    # Digital PDF - use PyMuPDF text blocks for positions.
+                    # No need to render a bitmap image.
                     words = self._extract_words_from_page(page)
                     pages.append(PageData(
-                        words=words, text=page_text, image=img
+                        words=words, text=page_text, image=None
                     ))
                 else:
-                    # Image-based - use Tesseract with positions
+                    # Image-based page - render and OCR.
                     logger.info(
                         "Page %d has no text, using OCR", page.number + 1
                     )
+                    img = self._render_page(page)
                     words, ocr_text = self._ocr_with_positions(img)
                     pages.append(PageData(
                         words=words, text=ocr_text, image=img
@@ -124,7 +126,7 @@ class PDFReader:
             words: list[Word] = []
             for i in range(len(data["text"])):
                 text = data["text"][i].strip()
-                if not text or int(data["conf"][i]) < 0:
+                if not text or int(float(data["conf"][i])) < 0:
                     continue
                 words.append(Word(
                     text=text,

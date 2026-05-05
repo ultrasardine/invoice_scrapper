@@ -265,7 +265,7 @@ class TableDetector:
             words: list[Word] = []
             for i in range(len(data["text"])):
                 text = data["text"][i].strip()
-                if not text or int(data["conf"][i]) < 0:
+                if not text or int(float(data["conf"][i])) < 0:
                     continue
                 words.append(Word(
                     text=text,

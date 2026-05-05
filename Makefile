@@ -146,10 +146,8 @@ endif
 	@echo "Run:   open dist/macos/$(APP_NAME).app"
 
 pack-windows: check-tesseract ## Package standalone Windows .exe (run on Windows with make/MSYS2)
-ifdef UNAME_S
-ifneq ($(UNAME_S),)
+ifneq (,$(filter Linux Darwin,$(UNAME_S)))
 	$(error pack-windows must be run on Windows. Use CI for cross-platform builds.)
-endif
 endif
 	$(PACK_BASE) \
 		--distpath dist/windows \

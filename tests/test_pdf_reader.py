@@ -3,8 +3,6 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from PIL import Image
-
 from invoice_scrapper.pdf_reader import PDFReader, Word, PageData
 
 
@@ -46,7 +44,8 @@ def test_text_based_pdf_no_ocr(mock_fitz):
     text, images = reader.extract(Path("test.pdf"))
 
     assert "Fatura número 123" in text
-    assert len(images) == 1
+    # Text-based pages are not rendered to bitmaps; no images produced.
+    assert len(images) == 0
 
 
 @patch("invoice_scrapper.pdf_reader.pytesseract")
@@ -94,7 +93,8 @@ def test_multiple_pages(mock_fitz):
     reader = PDFReader()
     text, images = reader.extract(Path("multi.pdf"))
 
-    assert len(images) == 3
+    # Text-based pages are not rendered; all 3 pages are text pages here.
+    assert len(images) == 0
     assert "Page 0" in text
     assert "Page 2" in text
 
