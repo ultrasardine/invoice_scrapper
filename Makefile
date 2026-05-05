@@ -136,20 +136,31 @@ PACK_BASE = uv run flet pack main.py \
 	--hidden-import invoice_scrapper.invoice_processor \
 	--hidden-import invoice_scrapper.excel_writer
 
-pack-macos: check-tesseract ## Package standalone macOS .app (run on macOS)
+pack-macos: check-tesseract ## Package standalone macOS .app (run on macOS only)
+ifneq ($(UNAME_S),Darwin)
+	$(error pack-macos must be run on macOS. Use CI for cross-platform builds.)
+endif
 	$(PACK_BASE) --distpath dist/macos
 	@echo ""
 	@echo "Built: dist/macos/$(APP_NAME).app"
 	@echo "Run:   open dist/macos/$(APP_NAME).app"
 
-pack-windows: check-tesseract ## Package standalone Windows .exe (run on Windows)
+pack-windows: check-tesseract ## Package standalone Windows .exe (run on Windows with make/MSYS2)
+ifdef UNAME_S
+ifneq ($(UNAME_S),)
+	$(error pack-windows must be run on Windows. Use CI for cross-platform builds.)
+endif
+endif
 	$(PACK_BASE) \
 		--distpath dist/windows \
 		--company-name "Invoice Scrapper"
 	@echo ""
-	@echo "Built: dist\\windows\\$(APP_NAME).exe"
+	@echo "Built: dist\windows\$(APP_NAME).exe"
 
-pack-linux: check-tesseract ## Package standalone Linux binary (run on Linux)
+pack-linux: check-tesseract ## Package standalone Linux binary (run on Linux only)
+ifneq ($(UNAME_S),Linux)
+	$(error pack-linux must be run on Linux. Use CI for cross-platform builds.)
+endif
 	$(PACK_BASE) --distpath dist/linux
 	@echo ""
 	@echo "Built: dist/linux/$(APP_NAME)"

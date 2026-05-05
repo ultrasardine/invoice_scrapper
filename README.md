@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-55%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-63%20passed-brightgreen.svg)]()
 
 Desktop application to extract data from PDF invoices and export to Excel. Built with Flet (Python).
 
@@ -11,8 +11,9 @@ Designed for Portuguese invoices from multiple suppliers with varying layouts. H
 ## Features
 
 - **PDF text extraction** with OCR fallback (Tesseract) for image-based invoices
-- **Table detection** for line items using img2table + OpenCV + borderless detection
-- **Field extraction** via keyword proximity + regex (case/accent insensitive)
+- **Positional word-based extraction** — uses Tesseract's word-level coordinates for accurate field and table detection
+- **Table detection** via header keyword matching + column alignment from word positions
+- **Field extraction** by finding labels and grabbing values to the right/below based on coordinates
 - **Customizable field list** — editable in the UI and persisted to config file
 - **Excel output** — one row per line item, invoice-level fields repeated
 - **Real-time log** and progress feedback during processing
@@ -20,7 +21,7 @@ Designed for Portuguese invoices from multiple suppliers with varying layouts. H
 
 ## How It Works
 
-The app processes a folder of PDF invoices through a 5-stage pipeline and outputs a single Excel file where each row represents one line item (artigo) from an invoice.
+The app processes a folder of PDF invoices through a pipeline and outputs a single Excel file where each row represents one line item (artigo) from an invoice.
 
 ### Processing Pipeline
 
@@ -33,7 +34,8 @@ PDF File
 │    Try PyMuPDF text extraction per page.         │
 │    If a page has no embedded text → render to    │
 │    image at 300 DPI → OCR with Tesseract (por).  │
-│    Output: full text + list of page images       │
+│    Output: Word objects with text + x/y/w/h      │
+│    positions, full text, and page images.         │
 └──────────────┬──────────────────────────────────┘
                │
        ┌───────┴───────┐
@@ -42,13 +44,14 @@ PDF File
 │ 2. Field     │ │ 3. Table Detector             │
 │ Extractor    │ │    (table_detector.py)         │
 │              │ │                                │
-│ Search text  │ │ For each page image:           │
-│ for field    │ │  a) img2table (primary)        │
-│ labels,      │ │  b) OpenCV line detection      │
-│ extract      │ │  c) Borderless text alignment  │
-│ nearby       │ │                                │
-│ values via   │ │ Pick best result by content    │
-│ regex        │ │ cell count.                    │
+│ Find label   │ │ Group words into rows by       │
+│ words by     │ │ y-position. Find header row    │
+│ position,    │ │ by matching known keywords     │
+│ grab values  │ │ (QTD, P.UNIT, REFERÊNCIA...). │
+│ to the       │ │ Define columns from header     │
+│ right/below  │ │ positions. Assign data row     │
+│ using word   │ │ words to columns by x-pos.     │
+│ coordinates  │ │                                │
 │              │ │ Output: 2D string arrays       │
 └──────┬───────┘ └──────────────┬───────────────┘
        │                        │
@@ -58,6 +61,7 @@ PDF File
 │    Match table column headers to known keywords  │
 │    (quantidade, preço unitário, qtd, p.unit...) │
 │    Extract one LineItem per data row.             │
+│    Validate numeric values (filter OCR noise).   │
 └──────────────────────┬──────────────────────────┘
                        │
                        ▼
@@ -72,30 +76,32 @@ PDF File
 
 ### Field Extraction Strategy
 
-The field extractor uses a combined **keyword proximity + regex** approach:
+The field extractor uses **positional word data** from Tesseract OCR:
 
-1. **Normalize** both the invoice text and the field label (remove accents, lowercase)
-2. **Search** for the field label in the text. If not found, try individual words (>3 chars)
-3. **Extract** the value from a 200-character window after the label using a field-specific regex:
+1. **OCR with positions** — Tesseract `image_to_data` returns each word with its bounding box (x, y, width, height)
+2. **Find labels** — locate known label words (e.g., "Fatura", "Nº:", "DATA EMISSÃO") by matching against the word list
+3. **Extract values** — grab words to the right of or below the label based on coordinates
 
-| Field type | Regex pattern | Example match |
+| Field | Strategy | Example |
 |---|---|---|
-| Date fields (`data`) | `dd/mm/yyyy`, `dd-mm-yyyy`, `dd.mm.yyyy` | `15/03/2024` |
-| Money fields (`preço`, `total`) | Decimal with thousands separator | `1.250,00` or `1,250.00` |
-| Reference fields (`número`, `referência`, `guia`, `imputação`) | Alphanumeric sequences | `FT-2024/1234`, `IMP-001` |
-| Text fields (fallback) | First non-empty value after colon/space | `Empresa ABC Lda` |
+| Fornecedor (supplier) | Company suffix (LDA, S.A.) or largest font at top | `LUSO PROMOVE, LDA` |
+| Número da fatura | Find "Fatura Nº:" label, grab value to right; fallback to ATCUD | `FAC 3/243` |
+| Data da fatura | Find "DATA EMISSÃO" header, grab date below/right | `2025-10-28` |
+| Preço total sem IVA | Find "Base Incidência" or "Total Ilíquido", grab money value | `186,28` |
+| Generic fields | Find longest keyword match, grab value to the right | `IMP-2024-001` |
 
 Matching is **case-insensitive** and **accent-insensitive** — `"Número"` matches `"numero"`, `"NÚMERO"`, etc.
 
 ### Table Detection Strategy
 
-Tables are detected using a 3-tier fallback approach on each page image:
+Tables are detected using **positional word alignment**:
 
-1. **img2table** (primary) — uses the img2table library with Tesseract OCR to detect bordered tables with implicit rows/columns
-2. **OpenCV line detection** (fallback) — detects horizontal and vertical lines via morphological operations, finds grid intersections, OCRs each cell
-3. **Borderless text alignment** (last resort) — extracts all text with positions via Tesseract, groups by vertical position into rows, clusters x-positions into columns
-
-The detector runs both img2table and OpenCV, then picks the result with more content cells (20% threshold). If neither finds anything, borderless detection is attempted.
+1. **Group words into rows** by y-position (words within 25px vertical tolerance = same row)
+2. **Find header row** by matching words against known column keywords (referência, descrição, qtd, p.unit, total, iva, etc.)
+3. **Define columns** from the x-positions of matched header words
+4. **Extract data rows** below the header, assigning each word to the nearest column by x-position
+5. **Stop at end markers** (OBSERVAÇÕES, RESUMO DE IMPOSTOS, etc.)
+6. **Validate values** — filter OCR noise from numeric columns (qty, price)
 
 ### Excel Output Format
 
@@ -125,9 +131,9 @@ invoice_scrapper/
 ├── bundle_paths.py       # Tesseract path resolver for packaged apps
 ├── config.py             # Config manager (~/.invoice_scrapper/config.json)
 ├── models.py             # InvoiceData, LineItem, ProcessingResult
-├── pdf_reader.py         # PyMuPDF text extraction + Tesseract OCR fallback
-├── table_detector.py     # img2table + OpenCV + borderless detection
-├── field_extractor.py    # Keyword proximity + regex field extraction
+├── pdf_reader.py         # PyMuPDF text extraction + Tesseract OCR with positions
+├── table_detector.py     # Header keyword matching + column alignment
+├── field_extractor.py    # Positional word-based field extraction
 ├── invoice_processor.py  # Pipeline orchestrator
 ├── excel_writer.py       # openpyxl Excel output
 └── ui/
@@ -140,10 +146,10 @@ invoice_scrapper/
 |---|---|
 | `config.py` | Load/save config from `~/.invoice_scrapper/config.json`. Stores input dir, output file path, and field list. Falls back to defaults if file is missing or corrupted. |
 | `models.py` | Data classes: `InvoiceData` (invoice-level fields + line items), `LineItem` (unit price + quantity), `ProcessingResult` (success/error per file). `InvoiceData.to_rows()` flattens to dicts for Excel. |
-| `pdf_reader.py` | Opens PDF with PyMuPDF. For each page: extracts embedded text; if empty, renders at 300 DPI and OCRs with Tesseract (Portuguese). Returns full text + page images. |
-| `table_detector.py` | Detects tables in page images using 3-tier fallback (img2table → OpenCV → borderless). Returns tables as `list[list[list[str]]]` (list of tables, each a 2D string array). |
-| `field_extractor.py` | Searches text for field labels (accent/case insensitive), extracts values using field-type-specific regex. Skips per-item fields (handled by table detector). |
-| `invoice_processor.py` | Orchestrates the pipeline: PDF reader → field extractor → table detector → line item parser. Accepts a log callback for UI integration. Processes files individually so one failure doesn't stop the batch. |
+| `pdf_reader.py` | Opens PDF with PyMuPDF. For each page: extracts embedded text with word positions; if empty, renders at 300 DPI and OCRs with Tesseract (Portuguese) using `image_to_data` for word-level positions. Returns `PageData` objects with `Word` list, full text, and page image. |
+| `table_detector.py` | Groups words into rows by y-position. Finds header row by matching known column keywords. Defines columns from header word x-positions. Assigns data row words to columns. Returns tables as `list[list[list[str]]]`. |
+| `field_extractor.py` | Finds field labels in positional word data, extracts values to the right/below. Specialized extractors for supplier (font size + company suffix), invoice number (Fatura Nº + ATCUD fallback), date (DATA EMISSÃO header), and total (Base Incidência). Generic extractor for other fields. |
+| `invoice_processor.py` | Orchestrates the pipeline: PDF reader → field extractor → table detector → line item parser. Validates numeric values in qty/price columns. Accepts a log callback for UI integration. Processes files individually so one failure doesn't stop the batch. |
 | `excel_writer.py` | Writes `list[InvoiceData]` to an Excel file with openpyxl. One sheet, auto-sized columns, configurable field list. |
 | `bundle_paths.py` | Detects PyInstaller bundle (`sys.frozen`) and configures pytesseract to use the bundled Tesseract binary and tessdata. No-op when running from source. |
 | `ui/app.py` | Flet desktop UI. File pickers for input/output, editable field list, save/load config, process button with progress bar, scrollable log area. Processing runs in a background thread. |
@@ -230,38 +236,52 @@ Settings are stored in `~/.invoice_scrapper/config.json`:
 
 | Field | Description | Extraction method |
 |---|---|---|
-| fornecedor | Supplier name | Text search |
-| número da fatura | Invoice number | Text search (alphanumeric regex) |
-| data da fatura | Invoice date | Text search (date regex) |
-| preço total sem IVA | Total price without VAT | Text search (money regex) |
-| número da imputação da fatura | Imputation number | Text search (alphanumeric regex) |
-| referência nessa imputação | Imputation reference | Text search (alphanumeric regex) |
+| fornecedor | Supplier name | Company suffix / largest font at top |
+| número da fatura | Invoice number | "Fatura Nº:" label + ATCUD fallback |
+| data da fatura | Invoice date | "DATA EMISSÃO" header + date below |
+| preço total sem IVA | Total price without VAT | "Base Incidência" / "Total Ilíquido" |
+| número da imputação da fatura | Imputation number | Generic keyword search |
+| referência nessa imputação | Imputation reference | Generic keyword search |
 | preço unitário do artigo | Unit price per item | Table detection |
 | quantidade | Quantity per item | Table detection |
-| número da guia de remessa | Delivery note number | Text search (alphanumeric regex) |
-| cliente ou local de entrega | Client or delivery location | Text search |
+| número da guia de remessa | Delivery note number | Generic keyword search |
+| cliente ou local de entrega | Client or delivery location | Generic keyword search |
 
 ## Packaging
 
 Build standalone executables that bundle Python, all dependencies, Tesseract, and language data. End users don't need to install anything.
 
+**Each target must be run on its target OS** (PyInstaller limitation). The Makefile enforces this with OS guards.
+
 ```bash
 # macOS (run on macOS)
 make pack-macos    # → dist/macos/InvoiceScrapper.app
-
-# Windows (run on Windows)
-make pack-windows  # → dist/windows/InvoiceScrapper.exe
 
 # Linux (run on Linux)
 make pack-linux    # → dist/linux/InvoiceScrapper
 ```
 
-Each target must be run on its target OS (PyInstaller limitation). For cross-platform builds, use CI with a matrix strategy.
+### Windows Packaging
+
+Windows doesn't use `make`. Run the included batch script:
+
+```cmd
+pack-windows.bat
+```
+
+This auto-detects Tesseract paths and produces `dist\windows\InvoiceScrapper.exe`.
+
+Prerequisites:
+- Python 3.13+ with [uv](https://docs.astral.sh/uv/) installed
+- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) installed with Portuguese language data
+- Run `uv sync --all-extras` first to install dependencies
+
+For cross-platform builds, use CI with a matrix strategy.
 
 ## Testing
 
 ```bash
-make test              # Run all 55 tests
+make test              # Run all 63 tests
 make test-verbose      # With stdout visible
 make test-coverage     # With coverage report
 ```
@@ -272,10 +292,10 @@ make test-coverage     # With coverage report
 |---|---|
 | `test_config.py` | Config load/save, defaults, partial configs, corruption handling |
 | `test_models.py` | `to_rows()` output, field defaults, line item expansion |
-| `test_pdf_reader.py` | Text extraction, OCR fallback trigger, multi-page handling |
-| `test_table_detector.py` | img2table/OpenCV/borderless fallback, best-table selection |
-| `test_field_extractor.py` | Each field type, missing fields, case/accent insensitivity |
-| `test_invoice_processor.py` | Full pipeline, error isolation, log callbacks, header matching |
+| `test_pdf_reader.py` | Text extraction, OCR fallback, word positions, PageData |
+| `test_table_detector.py` | Header detection, column alignment, end-of-table, keyword matching |
+| `test_field_extractor.py` | Supplier, invoice number, date, total, generic fields, normalization |
+| `test_invoice_processor.py` | Full pipeline, error isolation, log callbacks, line item parsing |
 | `test_excel_writer.py` | Row counts, field repetition, blank cells, custom fields |
 
 ## Makefile Reference
@@ -292,9 +312,9 @@ Run `make help` to see all available commands:
 | `make test-coverage` | Run tests with coverage report |
 | `make lint` | Run ruff linting |
 | `make format` | Format code with ruff |
-| `make pack-macos` | Package standalone macOS app |
-| `make pack-windows` | Package standalone Windows exe |
-| `make pack-linux` | Package standalone Linux binary |
+| `make pack-macos` | Package standalone macOS app (macOS only) |
+| `make pack-windows` | Package standalone Windows exe (Windows only) |
+| `make pack-linux` | Package standalone Linux binary (Linux only) |
 | `make clean` | Remove build artifacts and caches |
 | `make ci` | Run full CI pipeline (lint + test) |
 
@@ -304,31 +324,30 @@ Run `make help` to see all available commands:
 |---|---|---|
 | UI | [Flet](https://flet.dev/) 0.84.0 | Desktop GUI with Material Design |
 | PDF parsing | [PyMuPDF](https://pymupdf.readthedocs.io/) | Text extraction + page rendering |
-| OCR | [pytesseract](https://github.com/madmaze/pytesseract) | Tesseract wrapper for image-based PDFs |
-| Table detection | [img2table](https://github.com/xavctn/img2table) | Primary table detection |
-| Image processing | [OpenCV](https://opencv.org/), [Pillow](https://pillow.readthedocs.io/) | Line detection, image manipulation |
+| OCR | [pytesseract](https://github.com/madmaze/pytesseract) | Tesseract wrapper — word-level positions + text |
+| Image processing | [Pillow](https://pillow.readthedocs.io/) | Image handling for OCR |
 | Excel | [openpyxl](https://openpyxl.readthedocs.io/) | Excel file generation |
 | Packaging | [PyInstaller](https://pyinstaller.org/) | Standalone executable bundling |
 
 ## FAQ
 
 **Q: The app doesn't find any fields in my invoice.**
-A: The field extractor searches for the exact field label text (case/accent insensitive) in the PDF. If your invoice uses different terminology (e.g., "NIF do fornecedor" instead of "fornecedor"), edit the field list in the UI to match. The extractor looks for the label and grabs the value nearby.
+A: The field extractor searches for known label patterns (e.g., "Fatura Nº:", "DATA EMISSÃO") in the OCR'd text. If your invoice uses different terminology, the extractor may not find them. For generic fields, it searches for the field name keywords and grabs the value to the right.
 
 **Q: OCR results are poor / fields are extracted incorrectly.**
 A: Ensure Tesseract has Portuguese language data installed (`make check-tesseract`). For scanned invoices, quality depends on scan resolution — 300 DPI is the minimum for reliable OCR. Very skewed or low-contrast scans may produce poor results.
 
 **Q: No line items are detected even though the invoice has a table.**
-A: The table detector looks for column headers matching keywords like "quantidade", "qtd", "preço unitário", "p.unit", "valor". If your invoices use different column names, the line item parser won't match them. This can be improved by adding more keyword variants to `invoice_processor.py`.
+A: The table detector looks for header rows containing keywords like "quantidade", "qtd", "preço unitário", "p.unit", "referência", "descrição". If your invoices use different column names, add them to `_HEADER_KEYWORDS` in `table_detector.py`.
 
 **Q: Can I add custom fields beyond the defaults?**
-A: Yes. Click the "+" button in the UI to add new fields. The field extractor will search for whatever label you type. For best results, use the exact text that appears in your invoices near the value you want to extract.
+A: Yes. Click the "+" button in the UI to add new fields. The field extractor will search for whatever label you type using the generic keyword-based extraction.
 
 **Q: Why does packaging use PyInstaller instead of `flet build`?**
-A: `flet build` uses an embedded Python runtime that can have architecture mismatches on Apple Silicon Macs and struggles with native dependencies like `numba`/`llvmlite` (required by `img2table`). `flet pack` (PyInstaller) uses your system Python with pre-built wheels, avoiding these issues.
+A: `flet build` uses an embedded Python runtime that can have architecture mismatches on Apple Silicon Macs and struggles with native dependencies. `flet pack` (PyInstaller) uses your system Python with pre-built wheels, avoiding these issues.
 
 **Q: Can I build for Windows from macOS (or vice versa)?**
-A: No. PyInstaller produces binaries for the OS it runs on. For cross-platform builds, use CI (GitHub Actions, AppVeyor) with a build matrix targeting each OS.
+A: No. PyInstaller produces binaries for the OS it runs on. The Makefile enforces this — running `make pack-linux` on macOS will error. For cross-platform builds, use CI (GitHub Actions) with a build matrix targeting each OS.
 
 **Q: Where is the config file stored?**
 A: `~/.invoice_scrapper/config.json`. It's created when you click "Guardar Config" in the UI. If the file is missing or corrupted, the app falls back to defaults.
@@ -337,7 +356,7 @@ A: `~/.invoice_scrapper/config.json`. It's created when you click "Guardar Confi
 A: The error is logged and the app continues processing the remaining files. Failed invoices are counted in the summary. The Excel file contains data from all successfully processed invoices.
 
 **Q: Can I process invoices in languages other than Portuguese?**
-A: The OCR defaults to Portuguese (`por`). To change the language, modify the `OCR_LANG` constant in `pdf_reader.py` and `table_detector.py`, and install the corresponding Tesseract language data.
+A: The OCR defaults to Portuguese (`por`). To change the language, modify the `OCR_LANG` constant in `pdf_reader.py` and install the corresponding Tesseract language data.
 
 ## Contributing
 

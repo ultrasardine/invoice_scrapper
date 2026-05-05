@@ -1,301 +1,280 @@
-"""Table detection for line items using img2table + OpenCV."""
+"""Table detection using positional word data from OCR."""
 
 import logging
-from io import BytesIO
+import re
+import unicodedata
 
-import cv2
-import numpy as np
-import pytesseract
-from PIL import Image
-
-from img2table.document import Image as Img2TableImage
-from img2table.ocr import TesseractOCR
+from invoice_scrapper.pdf_reader import Word
 
 logger = logging.getLogger(__name__)
 
-OCR_LANG = "por"
+# Keywords that identify table header columns (normalized)
+_HEADER_KEYWORDS: dict[str, str] = {
+    "referencia": "referência",
+    "ref": "referência",
+    "codigo": "referência",
+    "artigo": "referência",
+    "descricao": "descrição",
+    "designacao": "descrição",
+    "produto": "descrição",
+    "qtd": "qtd",
+    "quantidade": "qtd",
+    "qty": "qtd",
+    "quant": "qtd",
+    "uni": "uni",
+    "unidade": "uni",
+    "p.unit": "p.unit",
+    "preco": "p.unit",
+    "unitario": "p.unit",
+    "unit": "p.unit",
+    "s/imp": "p.unit",
+    "desc": "desconto",
+    "desc1": "desconto",
+    "desc1+2": "desconto",
+    "desconto": "desconto",
+    "taxa": "taxa",
+    "iva": "iva",
+    "total": "total",
+    "valor": "total",
+    "montante": "total",
+}
+
+# Minimum number of recognized header keywords to consider a row as header
+_MIN_HEADER_MATCHES = 3
+
+# End-of-table markers (normalized)
+_END_MARKERS = [
+    "observa", "resumo", "imposto", "desconto global",
+    "liquido", "conta corrente", "incidencia",
+    "artigos faturados", "colocados", "disposicao",
+    "software", "processado por programa",
+]
+
+_MONEY_RE = re.compile(r"^\d[\d.]*,\d{2}$|^\d[\d,]*\.\d{2}$")
+
+
+def _normalize(text: str) -> str:
+    """Remove accents and lowercase."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
+
+
+def _group_into_rows(
+    words: list[Word], tolerance: int = 25
+) -> list[list[Word]]:
+    """Group words into rows by y-position."""
+    if not words:
+        return []
+
+    sorted_words = sorted(words, key=lambda w: (w.top, w.left))
+    rows: list[list[Word]] = []
+    current_row: list[Word] = [sorted_words[0]]
+    current_y = sorted_words[0].center_y
+
+    for w in sorted_words[1:]:
+        if abs(w.center_y - current_y) <= tolerance:
+            current_row.append(w)
+        else:
+            rows.append(sorted(current_row, key=lambda x: x.left))
+            current_row = [w]
+            current_y = w.center_y
+
+    if current_row:
+        rows.append(sorted(current_row, key=lambda x: x.left))
+
+    return rows
+
+
+def _match_header_keyword(text: str) -> str | None:
+    """Match a word to a header keyword, return canonical name."""
+    norm = _normalize(text).rstrip(".:()%*")
+    if len(norm) < 2:
+        return None
+    # Direct match
+    if norm in _HEADER_KEYWORDS:
+        return _HEADER_KEYWORDS[norm]
+    # Partial match - keyword must be substantial part of the word
+    for kw, canonical in _HEADER_KEYWORDS.items():
+        if len(kw) >= 3 and kw in norm:
+            return canonical
+    return None
+
+
+def _find_header_row(
+    rows: list[list[Word]],
+) -> tuple[int | None, list[tuple[int, int, str]]]:
+    """Find the header row and extract meaningful column positions.
+
+    Returns (row_index, columns) where columns is list of
+    (x_center, x_right, canonical_name).
+    """
+    for i, row in enumerate(rows):
+        columns: list[tuple[int, int, str]] = []
+        seen_canonicals: set[str] = set()
+
+        for w in row:
+            canonical = _match_header_keyword(w.text)
+            if canonical and canonical not in seen_canonicals:
+                columns.append((
+                    w.left + w.width // 2,
+                    w.right,
+                    canonical,
+                ))
+                seen_canonicals.add(canonical)
+
+        if len(columns) >= _MIN_HEADER_MATCHES:
+            return i, columns
+
+    return None, []
+
+
+def _assign_to_column(
+    word: Word, columns: list[tuple[int, int, str]]
+) -> int | None:
+    """Find which column a word belongs to based on x-position."""
+    word_center = word.left + word.width // 2
+    best_col = None
+    best_dist = float("inf")
+
+    for i, (col_center, _, _) in enumerate(columns):
+        dist = abs(word_center - col_center)
+        if dist < best_dist:
+            best_dist = dist
+            best_col = i
+
+    # Max distance depends on column spacing
+    if len(columns) >= 2:
+        avg_spacing = (columns[-1][0] - columns[0][0]) / (len(columns) - 1)
+        max_dist = avg_spacing * 0.6
+    else:
+        max_dist = 300
+
+    if best_col is not None and best_dist < max_dist:
+        return best_col
+    return None
+
+
+def _is_data_row(row: list[Word], header_y: int) -> bool:
+    """Check if a row is a data row."""
+    if not row:
+        return False
+    if row[0].top <= header_y:
+        return False
+    if len(row) < 2:
+        return False
+    # Must have at least one number
+    return any(any(c.isdigit() for c in w.text) for w in row)
+
+
+def _is_end_of_table(row: list[Word]) -> bool:
+    """Detect end of table."""
+    row_text = _normalize(" ".join(w.text for w in row))
+    return any(m in row_text for m in _END_MARKERS)
+
+
+def _is_sub_row(row: list[Word], prev_row: list[Word] | None) -> bool:
+    """Check if row is a continuation/sub-row (e.g., 'Tamanho: L')."""
+    if not row:
+        return True
+    # If row starts much further right than typical data rows, it's a sub-row
+    row_text = " ".join(w.text for w in row)
+    # Sub-rows typically have few words and no money values
+    if len(row) <= 3 and not any(_MONEY_RE.match(w.text) for w in row):
+        # Check if it looks like a label: value pair
+        if ":" in row_text or "matricula" in _normalize(row_text):
+            return True
+    return False
+
+
+def detect_tables(words: list[Word]) -> list[list[list[str]]]:
+    """Detect tables from positional word data.
+
+    Returns list of tables, each table is a 2D list of strings.
+    """
+    if not words:
+        return []
+
+    rows = _group_into_rows(words)
+    header_idx, columns = _find_header_row(rows)
+
+    if header_idx is None or not columns:
+        return []
+
+    header_y = rows[header_idx][0].top
+    header_texts = [col[2] for col in columns]
+
+    # Extract data rows
+    table: list[list[str]] = [header_texts]
+
+    for row in rows[header_idx + 1:]:
+        if _is_end_of_table(row):
+            break
+        if not _is_data_row(row, header_y):
+            continue
+        if _is_sub_row(row, None):
+            continue
+
+        # Assign each word to a column
+        cells = [""] * len(columns)
+        for w in row:
+            # Skip obvious noise
+            if w.text in ("|", "'", '"', "—", "-") and len(w.text) <= 1:
+                continue
+            col_idx = _assign_to_column(w, columns)
+            if col_idx is not None:
+                if cells[col_idx]:
+                    cells[col_idx] += " " + w.text
+                else:
+                    cells[col_idx] = w.text
+
+        # Only add if at least 2 cells have content
+        filled = sum(1 for c in cells if c.strip())
+        if filled >= 2:
+            table.append(cells)
+
+    if len(table) < 2:
+        return []
+
+    return [table]
 
 
 class TableDetector:
-    """Detect and extract tables from page images."""
+    """Detect and extract tables from page word data."""
 
-    def __init__(self, lang: str = OCR_LANG):
+    def __init__(self, lang: str = "por"):
         self.lang = lang
-        self._tesseract_ocr = TesseractOCR(lang=lang, n_threads=1)
 
-    def detect_tables(self, image: Image.Image) -> list[list[list[str]]]:
-        """Detect tables in an image.
-
-        Returns list of tables, each table is a 2D list of strings.
-        """
-        try:
-            img2table_result = self._detect_with_img2table(image)
-            opencv_result = self._detect_with_opencv(image)
-            tables = self._choose_best(img2table_result, opencv_result)
-            if not tables:
-                tables = self._detect_borderless(image)
-            return tables
-        except Exception as e:
-            logger.warning("Table detection failed: %s", e)
-            return []
-
-    def _detect_with_img2table(
-        self, image: Image.Image
+    def detect_tables_from_words(
+        self, words: list[Word]
     ) -> list[list[list[str]]]:
-        """Use img2table for primary table detection."""
-        try:
-            buf = BytesIO()
-            image.save(buf, format="PNG")
-            buf.seek(0)
-            img = Img2TableImage(src=buf)
-            extracted = img.extract_tables(
-                ocr=self._tesseract_ocr,
-                implicit_rows=True,
-                implicit_columns=True,
-                borderless_tables=True,
-                min_confidence=0,
-            )
-            tables: list[list[list[str]]] = []
-            for et in extracted:
-                df = et.df
-                if df is None or df.empty:
-                    continue
-                table = []
-                for _, row in df.iterrows():
-                    table.append([
-                        str(v).strip() if v is not None and str(v) not in ("nan", "None") else ""
-                        for v in row
-                    ])
-                tables.append(table)
-            return tables
-        except Exception as e:
-            logger.warning("img2table detection failed: %s", e)
+        """Detect tables using positional word data."""
+        return detect_tables(words)
+
+    def detect_tables(self, image) -> list[list[list[str]]]:
+        """Legacy interface - detect tables from image."""
+        import pytesseract
+        from PIL import Image as PILImage
+
+        if not isinstance(image, PILImage.Image):
             return []
 
-    def _detect_with_opencv(
-        self, image: Image.Image
-    ) -> list[list[list[str]]]:
-        """Use OpenCV line detection to find table structure."""
-        try:
-            cv_img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-            _, binary = cv2.threshold(
-                gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-            )
-
-            # Detect horizontal lines
-            h_len = max(30, gray.shape[1] // 40)
-            h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))
-            h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel, iterations=2)
-
-            # Detect vertical lines
-            v_len = max(30, gray.shape[0] // 40)
-            v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len))
-            v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel, iterations=2)
-
-            grid = cv2.add(h_lines, v_lines)
-            contours, _ = cv2.findContours(
-                grid, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-            )
-            if not contours:
-                return []
-
-            bounds = self._find_table_bounds(contours, gray.shape)
-            tables: list[list[list[str]]] = []
-
-            for x, y, w, h in bounds:
-                cells = self._extract_grid_cells(
-                    h_lines[y:y + h, x:x + w],
-                    v_lines[y:y + h, x:x + w],
-                    image, x, y, w, h,
-                )
-                if cells:
-                    tables.append(cells)
-            return tables
-        except Exception as e:
-            logger.warning("OpenCV detection failed: %s", e)
-            return []
-
-    def _find_table_bounds(
-        self, contours: list, shape: tuple[int, int]
-    ) -> list[tuple[int, int, int, int]]:
-        """Find bounding rects of potential tables."""
-        h, w = shape
-        min_area = w * h * 0.005
-        max_area = w * h * 0.98
-        bounds: list[tuple[int, int, int, int]] = []
-
-        for c in contours:
-            bx, by, bw, bh = cv2.boundingRect(c)
-            area = bw * bh
-            if area < min_area or area > max_area:
-                continue
-            if bw < 100 or bh < 50:
-                continue
-            # Check overlap with existing
-            dup = False
-            for ex, ey, ew, eh in bounds:
-                ox = max(0, min(bx + bw, ex + ew) - max(bx, ex))
-                oy = max(0, min(by + bh, ey + eh) - max(by, ey))
-                if ox * oy > 0.5 * min(area, ew * eh):
-                    dup = True
-                    break
-            if not dup:
-                bounds.append((bx, by, bw, bh))
-
-        bounds.sort(key=lambda b: b[2] * b[3], reverse=True)
-        return bounds[:5]
-
-    def _extract_grid_cells(
-        self,
-        h_lines: np.ndarray,
-        v_lines: np.ndarray,
-        image: Image.Image,
-        ox: int, oy: int, tw: int, th: int,
-    ) -> list[list[str]]:
-        """Extract cell text from a grid region."""
-        h_pos = self._find_line_positions(np.sum(h_lines, axis=1))
-        v_pos = self._find_line_positions(np.sum(v_lines, axis=0))
-
-        if len(h_pos) < 2 or len(v_pos) < 2:
-            return []
-
-        rows: list[list[str]] = []
-        for ri in range(len(h_pos) - 1):
-            row: list[str] = []
-            for ci in range(len(v_pos) - 1):
-                y1, y2 = h_pos[ri] + 3, h_pos[ri + 1] - 3
-                x1, x2 = v_pos[ci] + 3, v_pos[ci + 1] - 3
-                if x2 <= x1 or y2 <= y1:
-                    row.append("")
-                    continue
-                cell_img = image.crop((ox + x1, oy + y1, ox + x2, oy + y2))
-                try:
-                    text = pytesseract.image_to_string(
-                        cell_img, lang=self.lang
-                    ).strip()
-                except Exception:
-                    text = ""
-                row.append(text)
-            rows.append(row)
-        return rows
-
-    def _find_line_positions(
-        self, projection: np.ndarray, min_gap: int = 15
-    ) -> list[int]:
-        """Find line positions from projection profile."""
-        threshold = np.max(projection) * 0.3
-        above = projection > threshold
-        positions: list[int] = []
-        in_peak = False
-        start = 0
-
-        for i, val in enumerate(above):
-            if val and not in_peak:
-                in_peak = True
-                start = i
-            elif not val and in_peak:
-                in_peak = False
-                center = (start + i) // 2
-                if not positions or center - positions[-1] >= min_gap:
-                    positions.append(center)
-
-        if positions and positions[0] > min_gap:
-            positions.insert(0, 0)
-        if positions and positions[-1] < len(projection) - min_gap:
-            positions.append(len(projection) - 1)
-        return positions
-
-    def _detect_borderless(
-        self, image: Image.Image
-    ) -> list[list[list[str]]]:
-        """Detect borderless tables via text alignment analysis."""
         try:
             data = pytesseract.image_to_data(
                 image, lang=self.lang, output_type=pytesseract.Output.DICT
             )
-            # Collect text regions
-            regions: list[tuple[int, int, int, int, str]] = []
+            words: list[Word] = []
             for i in range(len(data["text"])):
                 text = data["text"][i].strip()
-                conf = float(data["conf"][i])
-                if not text or conf < 0:
+                if not text or int(data["conf"][i]) < 0:
                     continue
-                regions.append((
-                    data["left"][i], data["top"][i],
-                    data["width"][i], data["height"][i], text,
+                words.append(Word(
+                    text=text,
+                    left=data["left"][i],
+                    top=data["top"][i],
+                    width=data["width"][i],
+                    height=data["height"][i],
                 ))
-
-            if len(regions) < 6:
-                return []
-
-            # Group into rows by y-position
-            avg_h = sum(r[3] for r in regions) / len(regions)
-            sorted_r = sorted(regions, key=lambda r: r[1])
-            rows: list[list[tuple[int, int, int, int, str]]] = []
-            cur_row = [sorted_r[0]]
-            cur_y = sorted_r[0][1]
-
-            for r in sorted_r[1:]:
-                if abs(r[1] - cur_y) <= avg_h * 0.5:
-                    cur_row.append(r)
-                else:
-                    rows.append(sorted(cur_row, key=lambda x: x[0]))
-                    cur_row = [r]
-                    cur_y = r[1]
-            if cur_row:
-                rows.append(sorted(cur_row, key=lambda x: x[0]))
-
-            if len(rows) < 3:
-                return []
-
-            # Detect columns by clustering x-positions
-            all_x = sorted(r[0] for row in rows for r in row)
-            avg_w = sum(r[2] for row in rows for r in row) / sum(
-                len(row) for row in rows
-            )
-            cols = [all_x[0]]
-            for x in all_x[1:]:
-                if x - cols[-1] > avg_w * 0.3:
-                    cols.append(x)
-
-            if len(cols) < 2:
-                return []
-
-            # Build table
-            table: list[list[str]] = []
-            for row in rows:
-                cells = [""] * len(cols)
-                for r in row:
-                    # Find closest column
-                    ci = min(range(len(cols)), key=lambda i: abs(r[0] - cols[i]))
-                    if cells[ci]:
-                        cells[ci] += " " + r[4]
-                    else:
-                        cells[ci] = r[4]
-                table.append(cells)
-
-            return [table]
+            return detect_tables(words)
         except Exception as e:
-            logger.warning("Borderless detection failed: %s", e)
+            logger.warning("Table detection failed: %s", e)
             return []
-
-    @staticmethod
-    def _choose_best(
-        a: list[list[list[str]]], b: list[list[list[str]]]
-    ) -> list[list[list[str]]]:
-        """Choose the table set with more content cells."""
-        if not a and not b:
-            return []
-        if not a:
-            return b
-        if not b:
-            return a
-
-        def content_count(tables: list[list[list[str]]]) -> int:
-            return sum(
-                1 for t in tables for row in t for cell in row if cell.strip()
-            )
-
-        ca, cb = content_count(a), content_count(b)
-        return b if cb > ca * 1.2 else a
