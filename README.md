@@ -174,7 +174,7 @@ sudo apt-get install tesseract-ocr tesseract-ocr-por
 
 ### Windows
 
-Download the installer from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) and select Portuguese during installation. Ensure `tesseract.exe` is in your PATH.
+Download the installer from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) and select Portuguese during installation. Keeping `tesseract.exe` in your PATH is recommended, but the Windows packaging script also auto-detects the standard install folders.
 
 ## Setup
 
@@ -275,6 +275,8 @@ Prerequisites:
 - Python 3.13+ with [uv](https://docs.astral.sh/uv/) installed
 - [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) installed with Portuguese language data
 - Run `uv sync --all-extras` first to install dependencies
+
+`pack-windows.bat` looks for `tesseract.exe` in `PATH`, `%ProgramFiles%\Tesseract-OCR`, `%ProgramFiles(x86)%\Tesseract-OCR`, and `%LocalAppData%\Programs\Tesseract-OCR`. It also honors `TESSDATA_PREFIX` when language files live outside the default `tessdata` folder.
 
 For cross-platform builds, use CI with a matrix strategy.
 
