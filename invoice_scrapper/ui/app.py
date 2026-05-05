@@ -221,8 +221,12 @@ def main(page: ft.Page) -> None:
             process_btn.disabled = False
             page.update()
 
-        await page.run_task(lambda: asyncio.to_thread(run_processing))
-        processing = False
+        async def _run_in_thread():
+            nonlocal processing
+            await asyncio.to_thread(run_processing)
+            processing = False
+
+        page.run_task(_run_in_thread)
 
     process_btn.on_click = process_invoices
 
