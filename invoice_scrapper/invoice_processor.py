@@ -203,7 +203,6 @@ class InvoiceProcessor:
         # Remove common OCR noise
         clean = value.replace("|", "").replace("]", "").replace("[", "").strip()
         # Check if it looks like a number (digits with , or . separators)
-        import re
         m = re.match(r"^\d[\d\s.,]*\d$|^\d$", clean)
         if m:
             return clean
