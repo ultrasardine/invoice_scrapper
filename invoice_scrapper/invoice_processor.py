@@ -58,7 +58,7 @@ class InvoiceProcessor:
             all_text_parts: list[str] = []
             for p in pages:
                 all_text_parts.append(p.text)
-                page_fields = extract_fields(p.text, fields, words=p.words or None)
+                page_fields = extract_fields(p.text, fields, words=p.words if p.words else None)
                 for k, v in page_fields.items():
                     if v and not field_values.get(k):
                         field_values[k] = v

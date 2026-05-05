@@ -474,10 +474,11 @@ def _generic_field_extract(words: list[Word], norm_field: str) -> str:
             right = _words_to_right(m, words)
             if right:
                 # Collect all non-label words on the same line
-                value_parts = [
-                    r.text for r in right
-                    if _normalize(r.text).rstrip(".:,") not in field_words
-                ]
+                value_parts = []
+                for r in right:
+                    norm_r = _normalize(r.text).rstrip(".:,")
+                    if norm_r not in field_words:
+                        value_parts.append(r.text)
                 if value_parts:
                     return " ".join(value_parts)
     return ""
