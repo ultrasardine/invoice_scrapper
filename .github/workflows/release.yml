@@ -119,8 +119,19 @@ jobs:
           choco install tesseract --yes --no-progress
           $tessdata = "C:\Program Files\Tesseract-OCR\tessdata"
           New-Item -ItemType Directory -Force -Path $tessdata | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata" -OutFile "$tessdata\por.traineddata"
-          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" -OutFile "$tessdata\eng.traineddata"
+          
+          $porUrl = ""
+          $engUrl = ""
+          $porSha256 = "b4ec6494c2b24a18b0337bc5962bdc0e016c6965f7b7f8e89e0d0c36f6d1e84f"
+          $engSha256 = "7d4322bd2a7ca07c0054e6465bfe5d1de6eb129ecc75e17e5bde88e15d5b7b23"
+          
+          Invoke-WebRequest -Uri $porUrl -OutFile "$tessdata\por.traineddata"
+          $porHash = (Get-FileHash "$tessdata\por.traineddata" -Algorithm SHA256).Hash
+          if ($porHash -ne $porSha256) { throw "Checksum mismatch for por.traineddata" }
+          
+          Invoke-WebRequest -Uri $engUrl -OutFile "$tessdata\eng.traineddata"
+          $engHash = (Get-FileHash "$tessdata\eng.traineddata" -Algorithm SHA256).Hash
+          if ($engHash -ne $engSha256) { throw "Checksum mismatch for eng.traineddata" }
 
       - name: Build Windows executable
         if: runner.os == 'Windows'
