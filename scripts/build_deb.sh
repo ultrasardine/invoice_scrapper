@@ -34,7 +34,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${ARCH}
-Maintainer: Invoice Scrapper
+Maintainer: Invoice Scrapper <maintainer@example.com>
 Description: Desktop app to extract invoice data from Portuguese PDFs and export to Excel.
 EOF
 
