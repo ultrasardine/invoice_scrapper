@@ -19,6 +19,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.4.0",
     "pyinstaller>=6.0.0",
+    "python-semantic-release>=9.8.8",
 ]
 
 [build-system]
@@ -27,3 +28,29 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
+
+[tool.semantic_release]
+branch = "main"
+changelog_file = "CHANGELOG.md"
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["invoice_scrapper/__init__.py:__version__"]
+build_command = "echo 'No build step for semantic-release'"
+upload_to_pypi = false
+upload_to_release = true
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = [
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "style",
+    "test",
+]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+

@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  semantic-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Configure git identity for release commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Calculate next semantic version
+        id: next
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXT_VERSION="$(uv run semantic-release version --print 2>/dev/null | tr -d '\r' | tail -n 1 || true)"
+          if [[ "$NEXT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$ ]]; then
+            echo "has_release=true" >> "$GITHUB_OUTPUT"
+            echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=v$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run semantic release
+        if: steps.next.outputs.has_release == 'true'
+        run: uv run semantic-release version
+
+      - name: Export release outputs
+        id: release
+        run: |
+          echo "released=${{ steps.next.outputs.has_release }}" >> "$GITHUB_OUTPUT"
+          echo "version=${{ steps.next.outputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ steps.next.outputs.tag }}" >> "$GITHUB_OUTPUT"
+
+  build-artifacts:
+    needs: semantic-release
+    if: needs.semantic-release.outputs.released == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: InvoiceScrapper-windows
+            artifact_path: dist/windows/InvoiceScrapper.exe
+          - os: macos-latest
+            artifact_name: InvoiceScrapper-macos
+            artifact_path: dist/macos/InvoiceScrapper.app
+          - os: ubuntu-latest
+            artifact_name: InvoiceScrapper-linux
+            artifact_path: |
+              dist/linux/InvoiceScrapper
+              dist/linux-deb/*.deb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Install Tesseract (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tesseract tesseract-lang
+
+      - name: Install Tesseract (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-por tesseract-ocr-eng dpkg-dev
+
+      - name: Install Tesseract (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install tesseract --yes --no-progress
+          $tessdata = "C:\Program Files\Tesseract-OCR\tessdata"
+          New-Item -ItemType Directory -Force -Path $tessdata | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata" -OutFile "$tessdata\por.traineddata"
+          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" -OutFile "$tessdata\eng.traineddata"
+
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: pack-windows.bat
+
+      - name: Build macOS app
+        if: runner.os == 'macOS'
+        run: make pack-macos
+
+      - name: Build Linux binary and deb package
+        if: runner.os == 'Linux'
+        run: |
+          make pack-linux
+          bash scripts/build_deb.sh "${{ needs.semantic-release.outputs.version }}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  publish-release-assets:
+    needs: [semantic-release, build-artifacts]
+    if: needs.semantic-release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Attach distributables to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.semantic-release.outputs.tag }}
+          files: |
+            release-assets/**/*.exe
+            release-assets/**/*.app
+            release-assets/**/*.deb
+
