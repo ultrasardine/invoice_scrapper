@@ -171,7 +171,7 @@ jobs:
         with:
           tag_name: ${{ needs.semantic-release.outputs.tag }}
           files: |
-            release-assets/**/*.exe
-            release-assets/**/*.app
-            release-assets/**/*.deb
+            release-assets/InvoiceScrapper.exe
+            release-assets/InvoiceScrapper.app/**/*
+            release-assets/*.deb
 
