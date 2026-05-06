@@ -78,7 +78,7 @@ jobs:
             artifact_path: dist/windows/InvoiceScrapper.exe
           - os: macos-latest
             artifact_name: InvoiceScrapper-macos
-            artifact_path: dist/macos/InvoiceScrapper.app
+            artifact_path: dist/macos/InvoiceScrapper.app.zip
           - os: ubuntu-latest
             artifact_name: InvoiceScrapper-linux
             artifact_path: |
@@ -142,6 +142,12 @@ jobs:
         if: runner.os == 'macOS'
         run: make pack-macos
 
+      - name: Archive macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          cd dist/macos
+          zip -r InvoiceScrapper.app.zip InvoiceScrapper.app
+
       - name: Build Linux binary and deb package
         if: runner.os == 'Linux'
         run: |
@@ -172,6 +178,7 @@ jobs:
           tag_name: ${{ needs.semantic-release.outputs.tag }}
           files: |
             release-assets/InvoiceScrapper.exe
-            release-assets/InvoiceScrapper.app/**/*
+            release-assets/InvoiceScrapper.app.zip
+            release-assets/InvoiceScrapper
             release-assets/*.deb
 
